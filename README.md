@@ -1,6 +1,6 @@
 # RevOps Multi-Agent Workflow
 
-A production-style **Revenue Operations automation system** built with [Agno](https://agno.com) Workflows. Five specialized AI agents form a sequential pipeline that classifies, enriches, plans, reviews, and gate-keeps sales leads — with a **human-in-the-loop approval breakpoint** for high-stakes deals.
+A production-style **Revenue Operations automation system** built with [Agno](https://agno.com) Workflows. 4 specialized AI agents form a sequential pipeline that classifies, enriches, plans and reviews sales leads — with a **human-in-the-loop approval breakpoint** for high-stakes deals.
 
 ---
 
@@ -12,7 +12,7 @@ Given a raw sales lead (name, company, deal value, stage, notes), the system aut
 2. **Enriches** it — company profile from mock CRM, risk flags
 3. **Plans actions** — 3–5 specific follow-up actions with owners and deadlines
 4. **Reviews and approves** — quality gate with escalation decision
-5. **Human Approval** — blocking breakpoint when `escalate_to_manager=True` or review rejected; auto-skips otherwise
+5. **🌟Human Approval** — blocking breakpoint when `escalate_to_manager=True` or review rejected; auto-skips otherwise
 
 Every run produces structured JSON output and a full observability report (latency, tokens, status).
 
@@ -93,7 +93,6 @@ repo/
 │   └── mock_leads.json           # 4 demo leads covering all pipeline stages
 ├── demo/
 │   ├── run_demo.py               # CLI runner + Agno AgentOS UI server
-│   └── DEMO_5MIN.md              # 5-minute live demo script with talk track
 ├── tests/
 │   └── test_workflow.py          # 25-test pytest suite
 └── requirements.txt
