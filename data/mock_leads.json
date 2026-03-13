@@ -1,0 +1,46 @@
+[
+  {
+    "id": "lead-001",
+    "name": "Sarah Chen",
+    "company": "Acme Corp",
+    "email": "s.chen@acmecorp.com",
+    "deal_value": 120000,
+    "stage": "negotiation",
+    "last_contact_days": 18,
+    "notes": "Legal is reviewing MSA. Champion is VP of Ops.",
+    "industry": "Manufacturing"
+  },
+  {
+    "id": "lead-002",
+    "name": "Marcus Webb",
+    "company": "Globex",
+    "email": "m.webb@globex.io",
+    "deal_value": 45000,
+    "stage": "at_risk",
+    "last_contact_days": 47,
+    "notes": "Usage dropped 60% last month. No response to 3 follow-ups.",
+    "industry": "Technology"
+  },
+  {
+    "id": "lead-003",
+    "name": "Priya Nair",
+    "company": "Initech",
+    "email": "p.nair@initech.com",
+    "deal_value": 28000,
+    "stage": "renewal",
+    "last_contact_days": 5,
+    "notes": "Looking to expand to 3 more teams. Champion recently promoted to Director.",
+    "industry": "Finance"
+  },
+  {
+    "id": "lead-004",
+    "name": "James Okafor",
+    "company": "Umbrella Ltd",
+    "email": "j.okafor@umbrella.co",
+    "deal_value": 15000,
+    "stage": "qualification",
+    "last_contact_days": 3,
+    "notes": "Inbound demo request. Strong interest from ops team.",
+    "industry": "Healthcare"
+  }
+]
