@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
+from datetime import datetime, timezone
 
 from agno.workflow import Step, StepInput, StepOutput, Workflow
 
@@ -13,7 +15,7 @@ from app.agents.review_agent import create_review_agent
 from app.agents.triage_agent import create_triage_agent
 from app.models.schemas import (
     ActionPlan, EnrichedLead, EnrichmentOutput,
-    Lead, ReviewDecision, ReviewOutput, TriageResult, WorkflowState,
+    HumanApprovalResult, Lead, ReviewDecision, ReviewOutput, TriageResult, WorkflowState,
 )
 from app.tools.observability import ObservabilityTracker
 
@@ -104,7 +106,7 @@ def _run_with_retry(agent, prompt: str, schema, agent_name: str, tracker: Observ
     raise RuntimeError(f"{agent_name} failed after {MAX_RETRIES} attempts: {last_exc}")
 
 
-def _build_steps(tracker: ObservabilityTracker, state: WorkflowState) -> list:
+def _build_steps(tracker: ObservabilityTracker, state: WorkflowState, interactive: bool = False) -> list:
     """Build workflow steps over a typed shared state object."""
 
     def triage_executor(step_input: StepInput) -> StepOutput:
@@ -206,11 +208,92 @@ def _build_steps(tracker: ObservabilityTracker, state: WorkflowState) -> list:
         print(f"     {review.feedback}")
         return StepOutput(step_name="ReviewAgent", content=review.model_dump_json(), success=True)
 
+    def human_approval_executor(step_input: StepInput) -> StepOutput:  # noqa: ARG001
+        review = state.review
+        lead = state.lead
+        if review is None or lead is None:
+            return StepOutput(step_name="HumanApproval", content="Skipped — no review", success=False, stop=True)
+
+        needs_approval = review.escalate_to_manager or not review.approved
+        ts = datetime.now(timezone.utc).isoformat()
+
+        if not needs_approval:
+            result = HumanApprovalResult(
+                lead_id=lead.id,
+                decision="skipped",
+                triggered_by="auto_skipped",
+                timestamp=ts,
+            )
+            state.human_approval = result
+            print("  ✅ Human Approval → skipped (no escalation required)")
+            return StepOutput(step_name="HumanApproval", content=result.model_dump_json(), success=True)
+
+        # Determine why approval is needed
+        if review.escalate_to_manager and not review.approved:
+            triggered_by = "escalate_to_manager"
+        elif review.escalate_to_manager:
+            triggered_by = "escalate_to_manager"
+        else:
+            triggered_by = "review_rejected"
+
+        # Print approval summary
+        reasons = []
+        if review.escalate_to_manager:
+            reasons.append("escalate_to_manager=True")
+        if not review.approved:
+            reasons.append(f"review not approved (quality={review.quality_score:.0%})")
+        reason_str = " | ".join(reasons)
+
+        print(f"\n  {'=' * 56}")
+        print(f"  ⚠️  HUMAN APPROVAL REQUIRED")
+        print(f"  {'=' * 56}")
+        print(f"  Lead     : {lead.name} @ {lead.company}")
+        print(f"  Reason   : {reason_str}")
+        print(f"  Quality  : {review.quality_score:.0%}  |  Feedback: {review.feedback}")
+        print(f"  {'=' * 56}")
+
+        if not interactive:
+            result = HumanApprovalResult(
+                lead_id=lead.id,
+                decision="approved",
+                comment="Auto-approved (non-interactive mode)",
+                triggered_by=triggered_by,
+                timestamp=ts,
+            )
+            state.human_approval = result
+            print("  ✅ Human Approval → auto-approved (non-interactive mode)")
+            return StepOutput(step_name="HumanApproval", content=result.model_dump_json(), success=True)
+
+        # Blocking CLI prompt
+        try:
+            raw = input("\n  Approve? [y/n] (optional comment after space): ").strip()
+        except EOFError:
+            raw = "y"
+
+        parts = raw.split(" ", 1)
+        answer = parts[0].lower()
+        comment = parts[1] if len(parts) > 1 else ""
+        decision = "approved" if answer in ("y", "yes") else "rejected"
+
+        result = HumanApprovalResult(
+            lead_id=lead.id,
+            decision=decision,
+            comment=comment,
+            triggered_by=triggered_by,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+        state.human_approval = result
+
+        icon = "✅" if decision == "approved" else "❌"
+        print(f"\n  {icon} Human Approval → {decision.upper()}" + (f" — {comment}" if comment else ""))
+        return StepOutput(step_name="HumanApproval", content=result.model_dump_json(), success=True)
+
     return [
         Step(name="TriageAgent", executor=triage_executor, on_error="skip"),
         Step(name="EnrichmentAgent", executor=enrichment_executor, on_error="skip"),
         Step(name="ActionAgent", executor=action_executor, on_error="skip"),
         Step(name="ReviewAgent", executor=review_executor, on_error="skip"),
+        Step(name="HumanApproval", executor=human_approval_executor, on_error="skip"),
     ]
 
 
@@ -228,7 +311,7 @@ def build_revops_workflow(session_id: str = "revops-ui") -> Workflow:
     )
 
 
-def run_revops(lead_data: dict, session_id: str = "revops") -> dict:
+def run_revops(lead_data: dict, session_id: str = "revops", interactive: bool | None = None) -> dict:
     """
     Validate lead, run 4-agent pipeline, return result dict.
 
@@ -254,7 +337,7 @@ def run_revops(lead_data: dict, session_id: str = "revops") -> dict:
         name="RevOps Workflow",
         description="Revenue Operations: Intake/Triage → Enrichment → Action Planning → Review",
         session_id=f"{session_id}-{lead.id}",
-        steps=_build_steps(tracker, state),
+        steps=_build_steps(tracker, state, interactive=sys.stdin.isatty() if interactive is None else interactive),
         input_schema=Lead,
     )
 
@@ -274,5 +357,6 @@ def run_revops(lead_data: dict, session_id: str = "revops") -> dict:
         "enriched": _dump(state.enriched),
         "action_plan": _dump(state.action_plan),
         "review": _dump(state.review),
+        "human_approval": _dump(state.human_approval),
         "observability": obs.model_dump(),
     }

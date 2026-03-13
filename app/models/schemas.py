@@ -99,6 +99,16 @@ class ReviewDecision(BaseModel):
     escalate_to_manager: bool
 
 
+# ─── Human Approval ───────────────────────────────────────────────────────────
+
+class HumanApprovalResult(BaseModel):
+    lead_id: str
+    decision: Literal["approved", "rejected", "skipped"]
+    comment: str = ""
+    triggered_by: Literal["escalate_to_manager", "review_rejected", "auto_skipped"]
+    timestamp: str
+
+
 # ─── Observability ────────────────────────────────────────────────────────────
 
 class WorkflowObservability(BaseModel):
@@ -118,6 +128,7 @@ class WorkflowState(BaseModel):
     enriched: Optional[EnrichedLead] = None
     action_plan: Optional[ActionPlan] = None
     review: Optional[ReviewOutput] = None
+    human_approval: Optional[HumanApprovalResult] = None
 
     def start_run(self, lead: Lead) -> None:
         self.lead = lead
@@ -125,3 +136,4 @@ class WorkflowState(BaseModel):
         self.enriched = None
         self.action_plan = None
         self.review = None
+        self.human_approval = None

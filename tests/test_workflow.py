@@ -14,8 +14,8 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from app.models.schemas import (
-    ActionItem, ActionPlan, CompanyProfile, Lead, ReviewDecision,
-    ReviewOutput, TriageResult,
+    ActionItem, ActionPlan, CompanyProfile, HumanApprovalResult,
+    Lead, ReviewDecision, ReviewOutput, TriageResult,
 )
 from app.tools.crm_tools import get_lead_history, lookup_company
 from app.tools.observability import ObservabilityTracker
@@ -138,6 +138,147 @@ class TestFailureScenarios:
 
         assert any("TriageAgent" in e for e in tracker.errors)
         assert mock_agent.run.call_count == 3  # MAX_RETRIES
+
+
+# ─── Human-in-the-loop ────────────────────────────────────────────────────────
+
+class TestHumanApprovalStep:
+    """Unit tests for the HumanApproval step in non-interactive mode."""
+
+    def _make_lead(self):
+        return Lead(
+            id="lead-hitl", name="Test User", company="TestCo",
+            email="test@testco.com", deal_value=50000,
+            stage="proposal", last_contact_days=5,
+        )
+
+    def _make_plan(self):
+        return ActionPlan(
+            lead_id="lead-hitl", summary="Close fast.",
+            recommended_actions=[
+                ActionItem(action="Demo", owner="ae", due_in_days=2, priority="high")
+            ],
+            estimated_close_probability=0.6, next_best_action="Schedule demo.",
+        )
+
+    def test_skipped_when_no_escalation(self):
+        """Step records 'skipped' when review is approved and no escalation."""
+        from agno.workflow import StepInput
+        from app.tools.observability import ObservabilityTracker
+        from app.models.schemas import WorkflowState
+        from app.workflows.revops_workflow import _build_steps
+
+        state = WorkflowState()
+        state.lead = self._make_lead()
+        state.review = ReviewOutput(
+            lead_id="lead-hitl", approved=True, quality_score=0.85,
+            feedback="Good plan.", final_action_plan=self._make_plan(),
+            escalate_to_manager=False,
+        )
+        tracker = ObservabilityTracker(lead_id="lead-hitl")
+        steps = _build_steps(tracker, state, interactive=False)
+        human_step = next(s for s in steps if s.name == "HumanApproval")
+
+        output = human_step.executor(StepInput(input=None))
+        assert output.success is True
+        assert state.human_approval is not None
+        assert state.human_approval.decision == "skipped"
+        assert state.human_approval.triggered_by == "auto_skipped"
+
+    def test_auto_approved_when_escalate_to_manager(self):
+        """Step auto-approves in non-interactive mode when escalation is required."""
+        from agno.workflow import StepInput
+        from app.tools.observability import ObservabilityTracker
+        from app.models.schemas import WorkflowState
+        from app.workflows.revops_workflow import _build_steps
+
+        state = WorkflowState()
+        state.lead = self._make_lead()
+        state.review = ReviewOutput(
+            lead_id="lead-hitl", approved=True, quality_score=0.9,
+            feedback="Solid plan.", final_action_plan=self._make_plan(),
+            escalate_to_manager=True,
+        )
+        tracker = ObservabilityTracker(lead_id="lead-hitl")
+        steps = _build_steps(tracker, state, interactive=False)
+        human_step = next(s for s in steps if s.name == "HumanApproval")
+
+        output = human_step.executor(StepInput(input=None))
+        assert output.success is True
+        assert state.human_approval.decision == "approved"
+        assert state.human_approval.triggered_by == "escalate_to_manager"
+        assert "non-interactive" in state.human_approval.comment
+
+    def test_triggered_by_review_rejected(self):
+        """Step records 'review_rejected' trigger when review.approved=False."""
+        from agno.workflow import StepInput
+        from app.tools.observability import ObservabilityTracker
+        from app.models.schemas import WorkflowState
+        from app.workflows.revops_workflow import _build_steps
+
+        state = WorkflowState()
+        state.lead = self._make_lead()
+        state.review = ReviewOutput(
+            lead_id="lead-hitl", approved=False, quality_score=0.55,
+            feedback="Actions lack specificity.", final_action_plan=self._make_plan(),
+            escalate_to_manager=False,
+        )
+        tracker = ObservabilityTracker(lead_id="lead-hitl")
+        steps = _build_steps(tracker, state, interactive=False)
+        human_step = next(s for s in steps if s.name == "HumanApproval")
+
+        output = human_step.executor(StepInput(input=None))
+        assert output.success is True
+        assert state.human_approval.decision == "approved"
+        assert state.human_approval.triggered_by == "review_rejected"
+
+    def test_interactive_approve(self, monkeypatch):
+        """Step records human 'approved' decision from stdin in interactive mode."""
+        from agno.workflow import StepInput
+        from app.tools.observability import ObservabilityTracker
+        from app.models.schemas import WorkflowState
+        from app.workflows.revops_workflow import _build_steps
+
+        state = WorkflowState()
+        state.lead = self._make_lead()
+        state.review = ReviewOutput(
+            lead_id="lead-hitl", approved=True, quality_score=0.9,
+            feedback="Good.", final_action_plan=self._make_plan(),
+            escalate_to_manager=True,
+        )
+        tracker = ObservabilityTracker(lead_id="lead-hitl")
+        steps = _build_steps(tracker, state, interactive=True)
+        human_step = next(s for s in steps if s.name == "HumanApproval")
+
+        monkeypatch.setattr("builtins.input", lambda _: "y looks good to me")
+        output = human_step.executor(StepInput(input=None))
+        assert output.success is True
+        assert state.human_approval.decision == "approved"
+        assert state.human_approval.comment == "looks good to me"
+
+    def test_interactive_reject(self, monkeypatch):
+        """Step records human 'rejected' decision from stdin in interactive mode."""
+        from agno.workflow import StepInput
+        from app.tools.observability import ObservabilityTracker
+        from app.models.schemas import WorkflowState
+        from app.workflows.revops_workflow import _build_steps
+
+        state = WorkflowState()
+        state.lead = self._make_lead()
+        state.review = ReviewOutput(
+            lead_id="lead-hitl", approved=False, quality_score=0.4,
+            feedback="Too vague.", final_action_plan=self._make_plan(),
+            escalate_to_manager=False,
+        )
+        tracker = ObservabilityTracker(lead_id="lead-hitl")
+        steps = _build_steps(tracker, state, interactive=True)
+        human_step = next(s for s in steps if s.name == "HumanApproval")
+
+        monkeypatch.setattr("builtins.input", lambda _: "n needs more detail")
+        output = human_step.executor(StepInput(input=None))
+        assert output.success is True
+        assert state.human_approval.decision == "rejected"
+        assert state.human_approval.comment == "needs more detail"
 
 
 # ─── Workflow execution ───────────────────────────────────────────────────────
@@ -272,6 +413,8 @@ class TestWorkflowExecution:
         assert result["enriched"]["company_profile"]["industry"] == "Manufacturing"
         assert result["action_plan"]["lead_id"] == "lead-001"
         assert result["review"]["approved"] is True
+        assert result["human_approval"]["decision"] == "approved"
+        assert result["human_approval"]["triggered_by"] == "escalate_to_manager"
         assert result["observability"]["status"] == "success"
         assert set(result["observability"]["per_agent_latency_ms"]) == {
             "TriageAgent",
@@ -303,6 +446,7 @@ class TestPlaygroundCompatRoutes:
             "EnrichmentAgent",
             "ActionAgent",
             "ReviewAgent",
+            "HumanApproval",
         ]
 
     def test_ui_app_exposes_workflow_sessions_without_db_errors(self):
@@ -403,6 +547,71 @@ class TestPlaygroundCompatRoutes:
         payload = response.json()
         assert payload["workflow_id"] == "revops-workflow"
         assert payload["status"] == "COMPLETED"
+
+    def test_playground_run_route_returns_human_approval_in_result(self, monkeypatch):
+        """Human approval step auto-approves in non-interactive mode."""
+        from demo.run_demo import create_ui_app
+
+        lead_data = {
+            "id": "lead-001",
+            "name": "Sarah Chen",
+            "company": "Acme Corp",
+            "email": "s.chen@acmecorp.com",
+            "deal_value": 120000,
+            "stage": "negotiation",
+            "last_contact_days": 18,
+            "notes": "Legal is reviewing MSA.",
+            "industry": "Manufacturing",
+        }
+
+        monkeypatch.setattr("app.workflows.revops_workflow.create_triage_agent", lambda: object())
+        monkeypatch.setattr("app.workflows.revops_workflow.create_enrichment_agent", lambda: object())
+        monkeypatch.setattr("app.workflows.revops_workflow.create_action_agent", lambda: object())
+        monkeypatch.setattr("app.workflows.revops_workflow.create_review_agent", lambda: object())
+
+        def fake_run_with_retry(agent, prompt, schema, agent_name, tracker, inject=None):
+            tracker.agent_start(agent_name)
+            time.sleep(0.001)
+            tracker.agent_end(agent_name, tokens=10)
+            if agent_name == "TriageAgent":
+                return TriageResult(
+                    lead_id="lead-001", urgency="critical", category="new_business",
+                    priority_score=9, reason="High-value deal.", workflow_lane="accelerate",
+                )
+            if agent_name == "EnrichmentAgent":
+                return schema(
+                    company_profile=CompanyProfile(
+                        company_size="enterprise", employee_count=5000,
+                        annual_revenue_usd=500_000_000, industry="Manufacturing",
+                        health_score=0.72, recent_activity=[],
+                    ),
+                    risk_flags=[],
+                )
+            if agent_name == "ActionAgent":
+                return ActionPlan(
+                    lead_id="lead-001", summary="Close deal.",
+                    recommended_actions=[
+                        ActionItem(action="Call", owner="ae", due_in_days=1, priority="urgent")
+                    ],
+                    estimated_close_probability=0.7, next_best_action="Call today.",
+                )
+            if agent_name == "ReviewAgent":
+                # escalate_to_manager=True triggers human approval
+                return ReviewDecision(
+                    approved=True, quality_score=0.85,
+                    feedback="Solid plan.", escalate_to_manager=True,
+                )
+            raise AssertionError(f"Unexpected: {agent_name}")
+
+        monkeypatch.setattr("app.workflows.revops_workflow._run_with_retry", fake_run_with_retry)
+
+        client = TestClient(create_ui_app())
+        response = client.post(
+            "/playground/workflows/revops-workflow/runs",
+            json={"input": lead_data, "stream": False},
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "COMPLETED"
 
     def test_playground_run_route_falls_back_to_default_mock_lead(self, monkeypatch):
         from demo.run_demo import create_ui_app

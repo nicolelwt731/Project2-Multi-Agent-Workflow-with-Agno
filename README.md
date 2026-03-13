@@ -1,6 +1,6 @@
 # RevOps Multi-Agent Workflow
 
-A production-style **Revenue Operations automation system** built with [Agno](https://agno.com) Workflows. Four specialized AI agents form a sequential pipeline that classifies, enriches, plans, and reviews sales leads — end-to-end in seconds.
+A production-style **Revenue Operations automation system** built with [Agno](https://agno.com) Workflows. Five specialized AI agents form a sequential pipeline that classifies, enriches, plans, reviews, and gate-keeps sales leads — with a **human-in-the-loop approval breakpoint** for high-stakes deals.
 
 ---
 
@@ -12,6 +12,7 @@ Given a raw sales lead (name, company, deal value, stage, notes), the system aut
 2. **Enriches** it — company profile from mock CRM, risk flags
 3. **Plans actions** — 3–5 specific follow-up actions with owners and deadlines
 4. **Reviews and approves** — quality gate with escalation decision
+5. **Human Approval** — blocking breakpoint when `escalate_to_manager=True` or review rejected; auto-skips otherwise
 
 Every run produces structured JSON output and a full observability report (latency, tokens, status).
 
@@ -44,13 +45,30 @@ Lead Input (JSON)
 ┌─────────────────┐
 │  ReviewAgent    │  QA gate: quality score, approve/reject,
 │  (Output/QA)    │  escalate_to_manager flag
-└─────────────────┘
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐   escalate_to_manager=True  ┌─────────────────────────────┐
+│  HumanApproval  │ ─────────────────────────►  │  Blocking stdin prompt      │
+│  (HITL Gate)    │   OR review.approved=False   │  y/n + optional comment     │
+│                 │ ◄────────────────────────── │  decision stored in result  │
+│                 │   auto-skips when not needed └─────────────────────────────┘
+└────────┬────────┘
          │
          ▼
 Structured JSON + Observability Report
 ```
 
-**Pattern:** Coordinator → Specialists → Reviewer (matching the assignment's recommended Operators Team pattern)
+**Pattern:** Coordinator → Specialists → Reviewer → Human Gate
+
+**Trigger logic for human approval:**
+
+| Condition | Triggered by | Action |
+| --- | --- | --- |
+| `escalate_to_manager=True` | High-value deal at critical/high urgency, or at-risk with low health | Blocking prompt |
+| `review.approved=False` | Quality score below 0.7 | Blocking prompt |
+| Neither | Normal flow | Auto-record `skipped`, continue |
+| Non-interactive (UI/tests) | Any escalation | Auto-approve with note |
 
 ---
 
@@ -65,18 +83,19 @@ repo/
 │   │   ├── action_agent.py       # Action planning specialist
 │   │   └── review_agent.py       # QA review / final gate
 │   ├── workflows/
-│   │   └── revops_workflow.py    # Agno Workflow: step orchestration, retry, state
+│   │   └── revops_workflow.py    # Agno Workflow: step orchestration, retry, HITL, state
 │   ├── models/
-│   │   └── schemas.py            # All Pydantic models (Lead, TriageResult, etc.)
+│   │   └── schemas.py            # All Pydantic models (Lead → HumanApprovalResult)
 │   └── tools/
 │       ├── crm_tools.py          # Mock CRM lookup tools
 │       └── observability.py      # Latency, token, and error tracking
 ├── data/
 │   └── mock_leads.json           # 4 demo leads covering all pipeline stages
 ├── demo/
-│   └── run_demo.py               # CLI runner + Agno AgentOS UI server
+│   ├── run_demo.py               # CLI runner + Agno AgentOS UI server
+│   └── DEMO_5MIN.md              # 5-minute live demo script with talk track
 ├── tests/
-│   └── test_workflow.py          # Pytest suite
+│   └── test_workflow.py          # 25-test pytest suite
 └── requirements.txt
 ```
 
@@ -86,13 +105,25 @@ repo/
 
 | Requirement | Implementation |
 | --- | --- |
-| **Multi-Agent Orchestration** | 4-agent sequential pipeline: 1 coordinator (Triage) + 2 specialists (Enrichment, Action) + 1 reviewer (Review) |
+| **Multi-Agent Orchestration** | 5-agent sequential pipeline: 1 coordinator (Triage) + 2 specialists (Enrichment, Action) + 1 reviewer (Review) + 1 HITL gate (HumanApproval) |
 | **Runnable End-to-End** | `python demo/run_demo.py` — processes leads and returns structured JSON |
-| **Typed State** | 10 Pydantic models in `schemas.py`; `WorkflowState` tracks all inter-agent handoffs |
+| **Typed State** | 11 Pydantic models in `schemas.py`; `WorkflowState` tracks all inter-agent handoffs |
 | **Observability** | `ObservabilityTracker`: total latency, per-agent latency, token usage, success/partial/failed status |
 | **Resilience — Scenario 1** | Malformed lead input caught before any agent runs; returns `{"error": ...}` cleanly |
 | **Resilience — Scenario 2** | LLM/parse failure: `_run_with_retry` retries up to 3× with exponential backoff |
 | **Demo UX** | CLI with `rich` formatting + Agno AgentOS UI (`--ui` flag → `app.agno.com`) |
+
+---
+
+## Stretch Goals
+
+| Stretch Goal | Status | Details |
+| --- | --- | --- |
+| **Human-in-the-Loop** | ✅ Full | Blocking `stdin` prompt in CLI; auto-approve in UI/tests; records `decision`, `comment`, `triggered_by`, `timestamp` in `HumanApprovalResult` |
+| **Trace Visualization** | ✅ Full | `ObservabilityTracker` emits per-agent latency (ms), token counts, errors, and workflow status — printed and returned in every run's JSON |
+| **Self-Correction Loop** | ⚡ Partial | `_run_with_retry` — 3× retry with 0.3s × attempt backoff on any LLM/parse failure |
+| **Evaluation Harness** | ⚡ Partial | `ReviewAgent` scores output on 5 explicit rubric criteria (0–1 scale); `quality_score >= 0.7` required for approval |
+| **Parallel Specialists** | — | Not implemented; strict data dependencies make sequential the correct model |
 
 ---
 
@@ -112,7 +143,7 @@ pip install -r requirements.txt
 export OPENAI_API_KEY=sk-...
 ```
 
-All 4 agents use `gpt-4o-mini`.
+All 5 agents use `gpt-4o-mini`.
 
 ---
 
@@ -122,7 +153,7 @@ All 4 agents use `gpt-4o-mini`.
 
 ```bash
 # Run a single lead (index 0–3)
-python demo/run_demo.py --lead 0    # Sarah Chen — $120k negotiation (high-value)
+python demo/run_demo.py --lead 0    # Sarah Chen — $120k negotiation (triggers human approval)
 python demo/run_demo.py --lead 1    # Marcus Webb — at_risk, 47 days silent
 python demo/run_demo.py --lead 2    # Priya Nair  — renewal + expansion
 python demo/run_demo.py --lead 3    # James Okafor — new inbound
@@ -131,7 +162,7 @@ python demo/run_demo.py --lead 3    # James Okafor — new inbound
 python demo/run_demo.py
 ```
 
-**Example output:**
+**Example output (Lead 0 — Sarah Chen):**
 
 ```text
 ──────────────── Sarah Chen @ Acme Corp ────────────────
@@ -143,15 +174,33 @@ python demo/run_demo.py
      Next: Schedule executive alignment call with VP of Ops this week
   ✅ APPROVED | quality=85% 🚨 ESCALATE
 
+  ========================================================
+  ⚠️  HUMAN APPROVAL REQUIRED
+  ========================================================
+  Lead     : Sarah Chen @ Acme Corp
+  Reason   : escalate_to_manager=True
+  Quality  : 85%  |  Feedback: Plan is specific and appropriately urgent.
+  ========================================================
+
+  Approve? [y/n] (optional comment after space): y ship it — AE to call VP Monday
+
+  ✅ Human Approval → APPROVED — ship it — AE to call VP Monday
+
 ============================================================
   OBSERVABILITY REPORT  [a1b2c3d4]
   Status        : SUCCESS
-  Total latency : 4821.3 ms
-  TriageAgent          1203.4 ms     312 tokens
-  EnrichmentAgent      1544.1 ms     498 tokens
-  ActionAgent          1102.8 ms     421 tokens
-  ReviewAgent           970.6 ms     287 tokens
+  Total latency : 5,312.4 ms
+  TriageAgent          1,203 ms     312 tokens
+  EnrichmentAgent      1,544 ms     498 tokens
+  ActionAgent          1,103 ms     421 tokens
+  ReviewAgent            971 ms     287 tokens
 ============================================================
+```
+
+**Example output (Lead 1 — Marcus Webb, no escalation):**
+
+```text
+  ✅ Human Approval → skipped (no escalation required)
 ```
 
 ### Agno AgentOS UI Mode
@@ -162,35 +211,19 @@ python demo/run_demo.py --ui
 
 Then open [app.agno.com](https://app.agno.com) → Playground → Workflows → connect endpoint `localhost:7777`.
 
-Paste a lead JSON in the input field to run the pipeline interactively.
+In UI mode the `HumanApproval` step auto-approves (non-interactive) and logs the decision.
 
 ---
 
 ## Demo Scenarios
+**Quick reference:**
 
-Two leads are designed for a compelling side-by-side demo:
-
-**Lead 1 — High-value, late-stage** (`--lead 0`)
-
-```json
-{"id":"lead-001","name":"Sarah Chen","company":"Acme Corp",
- "deal_value":120000,"stage":"negotiation","last_contact_days":18,
- "notes":"Legal is reviewing MSA. Champion is VP of Ops.",
- "email":"s.chen@acmecorp.com","industry":"Manufacturing"}
-```
-
-Expected: CRITICAL urgency, `accelerate` lane, manager escalation, 4+ actions
-
-**Lead 2 — At-risk, silent** (`--lead 1`)
-
-```json
-{"id":"lead-002","name":"Marcus Webb","company":"Globex",
- "deal_value":45000,"stage":"at_risk","last_contact_days":47,
- "notes":"Usage dropped 60% last month. No response to 3 follow-ups.",
- "email":"m.webb@globex.io","industry":"Technology"}
-```
-
-Expected: `retain` lane, multiple risk flags, retention-focused actions
+| Lead | Deal | Stage | Expected outcome |
+| --- | --- | --- | --- |
+| `--lead 0` Sarah Chen | $120k | negotiation | CRITICAL · accelerate · human approval triggered |
+| `--lead 1` Marcus Webb | $45k | at_risk | HIGH · retain · approval skipped |
+| `--lead 2` Priya Nair | $78k | renewal | HIGH · renew · depends on health score |
+| `--lead 3` James Okafor | $22k | prospecting | LOW/MEDIUM · qualify · approval skipped |
 
 ---
 
@@ -216,17 +249,27 @@ print(run_revops({'id': 'bad', 'name': 'Test'}))  # missing required fields
 pytest tests/ -v
 ```
 
-Tests cover: schema validation, triage logic, enrichment, action planning, review, observability, and end-to-end workflow.
+**25 tests** across 6 classes:
+
+| Class | Tests | Coverage |
+| --- | --- | --- |
+| `TestSchemas` | 4 | Pydantic validation and field bounds |
+| `TestCRMTools` | 4 | CRM lookup happy path and fallback |
+| `TestObservability` | 3 | Latency tracking, error status |
+| `TestFailureScenarios` | 2 | Invalid input, retry exhaustion |
+| `TestHumanApprovalStep` | 5 | skipped, auto-approved, review_rejected, interactive approve/reject |
+| `TestWorkflowExecution` | 2 | End-to-end with mocked agents |
+| `TestPlaygroundCompatRoutes` | 5 | FastAPI routes, streaming, fallback input |
 
 ---
 
 ## Key Design Decisions
 
+**Why a blocking `input()` instead of an async approval queue?**
+For a CLI demo, synchronous `stdin` is the simplest, most legible human-in-the-loop pattern. The `interactive` flag (auto-detected via `sys.stdin.isatty()`, overridable) means the same step works in tests, UI, and live CLI without branching the workflow logic.
+
 **Why sequential steps vs. a team?**
 The RevOps pipeline has strict data dependencies — each agent builds on the previous agent's output. A sequential `Workflow` with `Steps` models this more clearly than a parallel team, and makes the data flow explicit and debuggable.
-
-**Why `gpt-4o-mini` for all agents?**
-The task is JSON extraction from structured prompts — `gpt-4o-mini` is fast, cheap, and reliable for this pattern. All agents use `use_json_mode=True` to enforce structured output.
 
 **Why a shared `WorkflowState`?**
 A single typed `WorkflowState` object (not a stringly-typed dict) makes inter-agent handoffs type-safe and easy to inspect. It also allows the UI mode to safely reset state between runs without reconstructing the workflow object.
