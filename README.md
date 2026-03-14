@@ -262,6 +262,17 @@ pytest tests/ -v
 
 ---
 
+## Tech Stack
+
+| Component | Library |
+| --- | --- |
+| Agent framework | [Agno](https://agno.com) 2.5.x |
+| LLM | OpenAI `gpt-4o-mini` |
+| Typed schemas | Pydantic v2 |
+| UI server | FastAPI + Uvicorn |
+| CLI output | Rich |
+| Tests | Pytest |
+
 ## Key Design Decisions
 
 **Why a blocking `input()` instead of an async approval queue?**
@@ -275,13 +286,17 @@ A single typed `WorkflowState` object (not a stringly-typed dict) makes inter-ag
 
 ---
 
-## Tech Stack
+## How I Worked With AI
 
-| Component | Library |
-| --- | --- |
-| Agent framework | [Agno](https://agno.com) 2.5.x |
-| LLM | OpenAI `gpt-4o-mini` |
-| Typed schemas | Pydantic v2 |
-| UI server | FastAPI + Uvicorn |
-| CLI output | Rich |
-| Tests | Pytest |
+- **Primary tool: Claude Code with the Octopus plugin** — Octopus lets Claude, Gemini, and GPT simultaneously debate a design question or problem, essentially turning multiple LLMs into a panel of opinionated agents. I used it heavily during architecture and design phases.
+- **Framework scaffolding was where AI sped me up the most** — standing up the Agno Workflow skeleton, wiring Pydantic models across five agents, and writing the `ObservabilityTracker` boilerplate all came together in a fraction of the time it would have taken manually.
+- **Debugging was the other major time-save** — tracing why steps silently returned `None`, fixing retry-backoff math, and resolving FastAPI route conflicts were all substantially faster with AI assistance surfacing root causes quickly.
+- **I spent more time *thinking with* the AI than prompting it to write code** — the most valuable sessions were structured debates between Claude, Gemini, and GPT on questions like "sequential steps vs. parallel team" and "blocking stdin vs. async approval queue." The multi-LLM disagreements helped me stress-test assumptions before writing a line of code.
+- **Human-in-the-loop approval was the hardest feature for AI to get right** — early AI-generated implementations either blocked unconditionally (breaking UI/test mode) or skipped the prompt entirely. Getting the `sys.stdin.isatty()` auto-detection plus the `interactive` override flag to behave correctly across CLI, tests, and Agno AgentOS required several correction rounds.
+- **The `interactive` flag logic needed manual redesign** — AI suggestions conflated non-interactive detection with the escalation trigger, causing the approval step to silently no-op in cases where it should have prompted. I rewrote the conditional logic and added the `triggered_by` field to the result model myself after the AI-generated versions kept regressing.
+- **Agno AgentOS UI integration was a personal stretch goal I did not fully land** — I attempted to surface the workflow as a proper interactive UI model on the Agno Playground, but the session-state and streaming contract between the FastAPI layer and `app.agno.com` needs more investigation. The `--ui` flag and the `TestPlaygroundCompatRoutes` suite represent the current state; the fully interactive UI remains a work in progress.
+- **Test coverage was partly AI-generated, partly hand-corrected** — AI produced the test class stubs quickly, but mock patching paths (`app.workflows.revops_workflow.input`) and the `TestPlaygroundCompatRoutes` async streaming tests needed manual fixes to match the actual module structure.
+- **One area where AI was confidently wrong: Agno API surface** — several generated code snippets referenced Agno methods that don't exist in 2.5.x (e.g., a `Workflow.run_step()` shorthand). I caught these by reading the Agno source and corrected them before they became runtime errors.
+
+---
+
